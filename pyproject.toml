@@ -1,9 +1,9 @@
 [project]
 name = "ryseble"
-version = "1.9.0"
-description = "Python library for RYSE BLE Smart Shade devices (used by Home Assistant integration)."
+version = "2.0.0"
+description = "Async Python library for RYSE BLE Smart Shade devices (used by the Home Assistant integration)."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [ { name = "MOHAMED Kallel", email = "mohamed.kallel@yahoo.fr" } ]
 classifiers = [
@@ -13,7 +13,15 @@ classifiers = [
 ]
 
 dependencies = [
-  "bleak>=0.22.0"
+  "bleak>=3.0.2",
+  "bleak-retry-connector>=4.6.3",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.24",
+  "dbus-fast>=2.21",
 ]
 
 [project.urls]
@@ -23,3 +31,10 @@ Homepage = "https://github.com/mohamedkallel82/ryseble"
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["ryseble*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

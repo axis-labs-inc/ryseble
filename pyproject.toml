@@ -1,6 +1,6 @@
 [project]
 name = "ryseble"
-version = "1.9.0"
+version = "1.9.1"
 description = "Python library for RYSE BLE Smart Shade devices (used by Home Assistant integration)."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -17,8 +17,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/mohamedkallel82/ryseble"
-"Bug Tracker" = "https://github.com/mohamedkallel82/ryseble/issues"
+Homepage = "https://github.com/axis-labs-inc/ryseble"
+"Bug Tracker" = "https://github.com/axis-labs-inc/ryseble/issues"
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]

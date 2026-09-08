@@ -6,13 +6,31 @@ read/write GATT characteristics, and deliver notifications via a callback.
 
 from __future__ import annotations
 
-from bleak import BleakClient, BleakScanner
-from bleak.backends.device import BLEDevice
-from .constants import HARDCODED_UUIDS
-from .packets import build_position_packet, build_get_position_packet
+import asyncio
 import logging
 
+from bleak import BleakClient, BleakError, BleakScanner
+from bleak.backends.device import BLEDevice
+
+from .bluez_agent import auto_confirm_pairing_agent
+from .constants import (
+    BOND_RETRIES,
+    BOND_RETRY_DELAY,
+    DEFAULT_CONNECT_ATTEMPTS,
+    HARDCODED_UUIDS,
+)
+from .packets import build_position_packet, build_get_position_packet
+
 _LOGGER = logging.getLogger(__name__)
+
+# D-Bus EOFError is raised when BlueZ drops the socket mid-call (typical after
+# the shade disconnects because pairing never completed). It is not an OSError.
+_CONNECTION_ERRORS = (BleakError, OSError, TimeoutError, EOFError)
+
+
+def _is_authentication_failed(err: BaseException) -> bool:
+    text = str(err).lower()
+    return "authenticationfailed" in text or "authentication failed" in text
 
 
 class RyseBLEDevice:
@@ -55,35 +73,95 @@ class RyseBLEDevice:
         self.address = ble_device.address
 
     async def pair(self):
-        """Connect to the device and subscribe to notifications."""
-        target = self._ble_device or self.address
-        if not target:
+        """Connect, bond, then subscribe to notifications.
+
+        The RX characteristic's CCCD is encrypted. Enabling notifications
+        before BlueZ has a bond makes the shade drop the link (ATT 0x0e).
+        Bond immediately after the GATT connect, then subscribe. On Linux a
+        temporary BlueZ Agent1 is registered *before* the connect so it can
+        answer the yes/no prompt that released Bleak cannot answer.
+        """
+        if not self._ble_device and not self.address:
             _LOGGER.error("No BLEDevice or address provided for pairing.")
             return False
-        _LOGGER.debug(
-            "Pairing with device %s",
-            self.address,
-        )
-        # Prefer the resolved BLEDevice so Bleak/habluetooth can route through
-        # the Home Assistant-selected adapter or ESPHome/Shelly proxy.
-        self.client = BleakClient(target)
+        _LOGGER.debug("Pairing with device %s", self.address)
         try:
-            await self.client.connect(timeout=30.0)
-            if self.client.is_connected:
-                _LOGGER.debug(
-                    "Successfully paired with %s",
-                    self.address,
+            async with auto_confirm_pairing_agent():
+                await self._connect()
+                if not self.client or not self.client.is_connected:
+                    raise BleakError(f"Could not connect to {self.address}")
+                await self._bond()
+                if not self.client or not self.client.is_connected:
+                    raise BleakError(
+                        f"Lost connection to {self.address} during pairing"
+                    )
+                await self.client.start_notify(
+                    self.rx_uuid, self._notification_handler
                 )
-                # Subscribe to notifications
-                await self.client.start_notify(self.rx_uuid, self._notification_handler)
-                return True
-        except Exception as e:
+            _LOGGER.debug("Successfully paired with %s", self.address)
+            return True
+        except Exception as err:
             _LOGGER.error(
                 "Error pairing with device %s: %s",
                 self.address,
-                e,
+                err,
             )
-        return False
+            await self.unpair()
+            return False
+
+    async def _connect(self) -> None:
+        """Establish a GATT connection, preferring bleak-retry-connector."""
+        if self._ble_device is not None:
+            try:
+                from bleak_retry_connector import (
+                    BleakClientWithServiceCache,
+                    establish_connection,
+                )
+            except ImportError:
+                self.client = BleakClient(self._ble_device)
+                await self.client.connect(timeout=30.0)
+                return
+            self.client = await establish_connection(
+                BleakClientWithServiceCache,
+                self._ble_device,
+                self.address or "RYSE",
+                ble_device_callback=lambda: self._ble_device,
+                max_attempts=DEFAULT_CONNECT_ATTEMPTS,
+            )
+            return
+
+        self.client = BleakClient(self.address)
+        await self.client.connect(timeout=30.0)
+
+    async def _bond(self) -> None:
+        """Establish an OS-level bond, retrying AuthenticationFailed."""
+        last_error: BaseException | None = None
+        for attempt in range(1, BOND_RETRIES + 2):
+            try:
+                await self.client.pair()
+                return
+            except _CONNECTION_ERRORS as err:
+                if not _is_authentication_failed(err):
+                    raise
+                last_error = err
+                if attempt > BOND_RETRIES:
+                    break
+                _LOGGER.debug(
+                    "Bonding with %s failed (%s); retry %s/%s",
+                    self.address,
+                    err,
+                    attempt,
+                    BOND_RETRIES,
+                )
+                await self.unpair()
+                await asyncio.sleep(BOND_RETRY_DELAY)
+                await self._connect()
+                if not self.client or not self.client.is_connected:
+                    raise BleakError(
+                        f"Lost connection to {self.address} during pairing retry"
+                    )
+        assert last_error is not None
+        raise last_error
 
     async def _notification_handler(self, sender, data):
         """Callback function for handling received BLE notifications."""
@@ -113,10 +191,15 @@ class RyseBLEDevice:
         return None
 
     async def unpair(self):
-        if self.client:
-            await self.client.disconnect()
-            _LOGGER.debug("Device disconnected")
-            self.client = None
+        client = self.client
+        self.client = None
+        if client is None:
+            return
+        try:
+            await client.disconnect()
+        except _CONNECTION_ERRORS as err:
+            _LOGGER.debug("Error disconnecting from %s: %s", self.address, err)
+        _LOGGER.debug("Device disconnected")
 
     async def read_data(self):
         if self.client:

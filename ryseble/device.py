@@ -98,9 +98,9 @@ class RyseBLEDevice:
                 new_position,
             )
 
-            # Notify cover.py about the position update
-            if hasattr(self, "update_callback"):
-                await self.update_callback(new_position)
+            callback = getattr(self, "update_callback", None)
+            if callable(callback):
+                await callback(new_position)
 
     async def get_device_info(self):
         if self.client:

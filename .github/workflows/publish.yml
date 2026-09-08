@@ -3,11 +3,17 @@ name: Publish ryseble to PyPI
 on:
   push:
     tags:
-      - 'v*'  # Run only when a version tag like v1.5.12 is pushed
+      - "v*"
 
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/ryseble
+    permissions:
+      contents: read
+      id-token: write # Required for Trusted Publishing & PEP 740 provenance
 
     steps:
       - name: Checkout code
@@ -18,8 +24,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
-        run: pip install build twine
+      - name: Install build
+        run: pip install build
 
       - name: Build package
         run: python -m build
@@ -27,5 +33,4 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          user: __token__
-          password: ${{ secrets.PYPI_API_TOKEN }}
+          attestations: true

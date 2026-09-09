@@ -15,6 +15,7 @@ ESPHome/Shelly proxies, macOS and Windows never hit this code.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 from collections.abc import AsyncIterator
@@ -22,6 +23,13 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
+
+# Home Assistant starts config entries for one domain concurrently. Only one
+# Agent1 can be the BlueZ default, and this module always exports the same
+# object path, so pairing two shades at once would unregister the first agent
+# and reject its confirmation. Serialize the whole register/pair/unregister
+# window on one event-loop lock.
+_agent_lock: asyncio.Lock | None = None
 
 BLUEZ_SERVICE = "org.bluez"
 AGENT_MANAGER_PATH = "/org/bluez"
@@ -31,6 +39,14 @@ AGENT_PATH = "/com/ryseble/agent"
 AGENT_CAPABILITY = "DisplayYesNo"
 _REJECTED = "org.bluez.Error.Rejected"
 _REJECTED_TEXT = "Not the intended RYSE device"
+
+
+def _get_agent_lock() -> asyncio.Lock:
+    """Return the process-wide pairing lock, creating it on first use."""
+    global _agent_lock
+    if _agent_lock is None:
+        _agent_lock = asyncio.Lock()
+    return _agent_lock
 
 
 def bluez_device_path_matches(device_path: str, address: str) -> bool:
@@ -242,23 +258,27 @@ async def auto_confirm_pairing_agent(address: str | None) -> AsyncIterator[None]
 
     On non-Linux platforms, or if dbus-fast / BlueZ is unavailable, this is a
     no-op so pairing can still be attempted with the host stack's own agent.
+
+    The agent is the BlueZ default for this process while the context is
+    active. Hold a shared lock so a second shade cannot replace it.
     """
-    if sys.platform != "linux" or not address:
-        yield
-        return
+    async with _get_agent_lock():
+        if sys.platform != "linux" or not address:
+            yield
+            return
 
-    session: _AgentSession | None = None
-    try:
-        session = await _AgentSession.start(address)
-    except Exception as err:
-        _LOGGER.warning(
-            "Could not register a BlueZ pairing agent; Pair may fail without "
-            "a yes/no confirmation: %s",
-            err,
-        )
+        session: _AgentSession | None = None
+        try:
+            session = await _AgentSession.start(address)
+        except Exception as err:
+            _LOGGER.warning(
+                "Could not register a BlueZ pairing agent; Pair may fail without "
+                "a yes/no confirmation: %s",
+                err,
+            )
 
-    try:
-        yield
-    finally:
-        if session is not None:
-            await session.stop()
+        try:
+            yield
+        finally:
+            if session is not None:
+                await session.stop()

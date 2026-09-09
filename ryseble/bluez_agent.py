@@ -5,6 +5,11 @@ fails with ``AuthenticationFailed`` on devices that ask for confirmation.
 This module fills that gap on Linux only: it registers a DisplayYesNo agent
 for the duration of connect+pair, then unregisters it.
 
+The agent may become the host default for that short window (required so
+Bleak's Pair call is answered), but every confirmation, authorization,
+PIN, and passkey handler rejects requests whose BlueZ object path is not
+the intended RYSE device.
+
 ESPHome/Shelly proxies, macOS and Windows never hit this code.
 """
 
@@ -24,13 +29,39 @@ AGENT_MANAGER_INTERFACE = "org.bluez.AgentManager1"
 AGENT_INTERFACE = "org.bluez.Agent1"
 AGENT_PATH = "/com/ryseble/agent"
 AGENT_CAPABILITY = "DisplayYesNo"
+_REJECTED = "org.bluez.Error.Rejected"
+_REJECTED_TEXT = "Not the intended RYSE device"
+
+
+def bluez_device_path_matches(device_path: str, address: str) -> bool:
+    """Return True if *device_path* is the BlueZ object for *address*.
+
+    BlueZ device paths look like ``/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF``.
+    The adapter segment is ignored so a second controller still matches.
+    """
+    if not device_path or not address:
+        return False
+    expected = "dev_" + address.replace("-", ":").replace(":", "_").upper()
+    last = device_path.rstrip("/").rsplit("/", 1)[-1].upper()
+    return last == expected
 
 
 class AutoConfirmAgent:
-    """BlueZ Agent1 that accepts pairing without prompting."""
+    """BlueZ Agent1 that accepts pairing only for one MAC address."""
 
-    def __init__(self, interface: Any) -> None:
-        self._interface = interface
+    def __init__(self, address: str) -> None:
+        self._address = address
+
+    def allows(self, device: str) -> bool:
+        """Return True if *device* is the BlueZ path for the intended shade."""
+        allowed = bluez_device_path_matches(device, self._address)
+        if not allowed:
+            _LOGGER.warning(
+                "Rejected BlueZ pairing request for %s (expected %s)",
+                device,
+                self._address,
+            )
+        return allowed
 
     def release(self) -> None:
         _LOGGER.debug("BlueZ agent Release")
@@ -73,14 +104,19 @@ class AutoConfirmAgent:
         return 0
 
 
-def _build_interface() -> Any:
+def _build_interface(address: str) -> Any:
     """Create a dbus-fast ServiceInterface bound to :class:`AutoConfirmAgent`."""
+    from dbus_fast.errors import DBusError
     from dbus_fast.service import ServiceInterface, method
 
     class AgentInterface(ServiceInterface):
         def __init__(self) -> None:
             super().__init__(AGENT_INTERFACE)
-            self.agent = AutoConfirmAgent(self)
+            self.agent = AutoConfirmAgent(address)
+
+        def _reject_unless_expected(self, device: str) -> None:
+            if not self.agent.allows(device):
+                raise DBusError(_REJECTED, _REJECTED_TEXT)
 
         @method()
         def Release(self):  # noqa: N802
@@ -92,32 +128,41 @@ def _build_interface() -> Any:
 
         @method()
         def RequestConfirmation(self, device: "o", passkey: "u"):  # noqa: F821,N802
+            self._reject_unless_expected(device)
             self.agent.request_confirmation(device, passkey)
 
         @method()
         def RequestAuthorization(self, device: "o"):  # noqa: F821,N802
+            self._reject_unless_expected(device)
             self.agent.request_authorization(device)
 
         @method()
         def AuthorizeService(self, device: "o", uuid: "s"):  # noqa: F821,N802
+            self._reject_unless_expected(device)
             self.agent.authorize_service(device, uuid)
 
         @method()
         def DisplayPinCode(self, device: "o", pincode: "s"):  # noqa: F821,N802
+            self._reject_unless_expected(device)
             self.agent.display_pin_code(device, pincode)
 
         @method()
         def DisplayPasskey(  # noqa: N802
             self, device: "o", passkey: "u", entered: "q"  # noqa: F821
         ):
+            # DisplayPasskey cannot return Rejected; ignore other devices.
+            if not self.agent.allows(device):
+                return
             self.agent.display_passkey(device, passkey, entered)
 
         @method()
         def RequestPinCode(self, device: "o") -> "s":  # noqa: F821,N802
+            self._reject_unless_expected(device)
             return self.agent.request_pin_code(device)
 
         @method()
         def RequestPasskey(self, device: "o") -> "u":  # noqa: F821,N802
+            self._reject_unless_expected(device)
             return self.agent.request_passkey(device)
 
     return AgentInterface()
@@ -150,12 +195,12 @@ class _AgentSession:
         self._interface = interface
 
     @classmethod
-    async def start(cls) -> _AgentSession:
+    async def start(cls, address: str) -> _AgentSession:
         from dbus_fast.aio import MessageBus
         from dbus_fast.constants import BusType
 
         bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
-        interface = _build_interface()
+        interface = _build_interface(address)
         bus.export(AGENT_PATH, interface)
         session = cls(bus, interface)
         try:
@@ -192,19 +237,19 @@ class _AgentSession:
 
 
 @asynccontextmanager
-async def auto_confirm_pairing_agent() -> AsyncIterator[None]:
+async def auto_confirm_pairing_agent(address: str | None) -> AsyncIterator[None]:
     """Register a confirming BlueZ agent around a ``Pair`` call.
 
     On non-Linux platforms, or if dbus-fast / BlueZ is unavailable, this is a
     no-op so pairing can still be attempted with the host stack's own agent.
     """
-    if sys.platform != "linux":
+    if sys.platform != "linux" or not address:
         yield
         return
 
     session: _AgentSession | None = None
     try:
-        session = await _AgentSession.start()
+        session = await _AgentSession.start(address)
     except Exception as err:
         _LOGGER.warning(
             "Could not register a BlueZ pairing agent; Pair may fail without "

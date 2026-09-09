@@ -86,7 +86,7 @@ class RyseBLEDevice:
             return False
         _LOGGER.debug("Pairing with device %s", self.address)
         try:
-            async with auto_confirm_pairing_agent():
+            async with auto_confirm_pairing_agent(self.address):
                 await self._connect()
                 if not self.client or not self.client.is_connected:
                     raise BleakError(f"Could not connect to {self.address}")

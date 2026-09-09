@@ -5,7 +5,7 @@ A small Python library to interact with RYSE BLE Smart Shade devices. Designed t
 used by Home Assistant integrations but reusable in other projects.
 
 ## Features
-- Pair/connect/disconnect with device
+- Pair/connect/disconnect with Bleak (BlueZ Agent1 on Linux to confirm bonding)
 - Read/write raw packets
 - Helpers to build position/get-position packets
 

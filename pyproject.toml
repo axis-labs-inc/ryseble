@@ -1,6 +1,6 @@
 [project]
 name = "ryseble"
-version = "1.12.1"
+version = "1.13.0"
 description = "Python library for RYSE BLE Smart Shade devices (used by Home Assistant integration)."
 readme = "README.md"
 requires-python = ">=3.9"

@@ -12,7 +12,7 @@ import logging
 from bleak import BleakClient, BleakError, BleakScanner
 from bleak.backends.device import BLEDevice
 
-from .bluez_agent import auto_confirm_pairing_agent
+from .bluez_agent import auto_confirm_pairing_agent, bleak_client_dbus_bus
 from .constants import (
     BOND_RETRIES,
     BOND_RETRY_DELAY,
@@ -78,26 +78,26 @@ class RyseBLEDevice:
         The RX characteristic's CCCD is encrypted. Enabling notifications
         before BlueZ has a bond makes the shade drop the link (ATT 0x0e).
         Bond immediately after the GATT connect, then subscribe. On Linux a
-        temporary BlueZ Agent1 is registered *before* the connect so it can
-        answer the yes/no prompt that released Bleak cannot answer.
+        temporary BlueZ Agent1 is registered on the Bleak client bus around
+        ``Pair`` so it can answer the yes/no prompt without becoming the host
+        default agent.
         """
         if not self._ble_device and not self.address:
             _LOGGER.error("No BLEDevice or address provided for pairing.")
             return False
         _LOGGER.debug("Pairing with device %s", self.address)
         try:
-            async with auto_confirm_pairing_agent(self.address):
-                await self._connect()
-                if not self.client or not self.client.is_connected:
-                    raise BleakError(f"Could not connect to {self.address}")
-                await self._bond()
-                if not self.client or not self.client.is_connected:
-                    raise BleakError(
-                        f"Lost connection to {self.address} during pairing"
-                    )
-                await self.client.start_notify(
-                    self.rx_uuid, self._notification_handler
+            await self._connect()
+            if not self.client or not self.client.is_connected:
+                raise BleakError(f"Could not connect to {self.address}")
+            await self._bond()
+            if not self.client or not self.client.is_connected:
+                raise BleakError(
+                    f"Lost connection to {self.address} during pairing"
                 )
+            await self.client.start_notify(
+                self.rx_uuid, self._notification_handler
+            )
             _LOGGER.debug("Successfully paired with %s", self.address)
             return True
         except Exception as err:
@@ -138,7 +138,10 @@ class RyseBLEDevice:
         last_error: BaseException | None = None
         for attempt in range(1, BOND_RETRIES + 2):
             try:
-                await self.client.pair()
+                async with auto_confirm_pairing_agent(
+                    self.address, bleak_client_dbus_bus(self.client)
+                ):
+                    await self.client.pair()
                 return
             except _CONNECTION_ERRORS as err:
                 if not _is_authentication_failed(err):

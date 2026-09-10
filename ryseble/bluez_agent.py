@@ -3,12 +3,13 @@
 Released Bleak does not register an ``org.bluez.Agent1``, so ``client.pair()``
 fails with ``AuthenticationFailed`` on devices that ask for confirmation.
 This module fills that gap on Linux only: it registers a DisplayYesNo agent
-for the duration of connect+pair, then unregisters it.
+on the Bleak client's D-Bus connection (the same unique name that sends
+``Device.Pair``), then unregisters it.
 
-The agent may become the host default for that short window (required so
-Bleak's Pair call is answered), but every confirmation, authorization,
-PIN, and passkey handler rejects requests whose BlueZ object path is not
-the intended RYSE device.
+The agent is *not* made the BlueZ default. BlueZ uses the caller's registered
+agent for Pair, so GNOME/bluetoothctl and other D-Bus connections keep the
+host default. Confirmation handlers still reject requests whose BlueZ object
+path is not the intended RYSE device.
 
 ESPHome/Shelly proxies, macOS and Windows never hit this code.
 """
@@ -24,11 +25,8 @@ from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
 
-# Home Assistant starts config entries for one domain concurrently. Only one
-# Agent1 can be the BlueZ default, and this module always exports the same
-# object path, so pairing two shades at once would unregister the first agent
-# and reject its confirmation. Serialize the whole register/pair/unregister
-# window on one event-loop lock.
+# BlueZ allows only one agent per D-Bus unique name. Serialize RYSE pairing
+# so two shades cannot race RegisterAgent on a reused client bus.
 _agent_lock: asyncio.Lock | None = None
 
 BLUEZ_SERVICE = "org.bluez"
@@ -203,20 +201,41 @@ async def _bluez_call(bus: Any, member: str, signature: str, body: list[Any]) ->
         raise RuntimeError(f"{member} failed: {error_name} {error_text}".strip())
 
 
+def bleak_client_dbus_bus(client: Any) -> Any | None:
+    """Return the D-Bus connection Bleak uses for ``Device.Pair``, if any.
+
+    Bleak opens a per-connection ``MessageBus`` on the BlueZ backend. Pair
+    is sent on that unique name, so the agent must be registered there rather
+    than on the global manager bus or as the host default.
+    """
+    if client is None:
+        return None
+    backend = getattr(client, "_backend", client)
+    bus = getattr(backend, "_bus", None)
+    if bus is None:
+        bus = getattr(client, "_bus", None)
+    if bus is None or not getattr(bus, "connected", False):
+        return None
+    return bus
+
+
 class _AgentSession:
-    """Registered BlueZ agent living on its own system-bus connection."""
+    """Registered BlueZ agent on a Bleak client's D-Bus connection."""
 
     def __init__(self, bus: Any, interface: Any) -> None:
         self._bus = bus
         self._interface = interface
 
     @classmethod
-    async def start(cls, address: str) -> _AgentSession:
-        from dbus_fast.aio import MessageBus
-        from dbus_fast.constants import BusType
+    async def start(cls, address: str, bus: Any) -> _AgentSession:
+        if bus is None or not getattr(bus, "connected", False):
+            raise RuntimeError("Bleak client has no D-Bus connection")
 
-        bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
         interface = _build_interface(address)
+        try:
+            bus.unexport(AGENT_PATH)
+        except Exception:
+            pass
         bus.export(AGENT_PATH, interface)
         session = cls(bus, interface)
         try:
@@ -228,13 +247,16 @@ class _AgentSession:
 
     async def _register(self) -> None:
         try:
-            await _bluez_call(self._bus, "RegisterAgent", "os", [AGENT_PATH, AGENT_CAPABILITY])
+            await _bluez_call(
+                self._bus, "RegisterAgent", "os", [AGENT_PATH, AGENT_CAPABILITY]
+            )
         except RuntimeError as err:
             if "AlreadyExists" not in str(err):
                 raise
             await _bluez_call(self._bus, "UnregisterAgent", "o", [AGENT_PATH])
-            await _bluez_call(self._bus, "RegisterAgent", "os", [AGENT_PATH, AGENT_CAPABILITY])
-        await _bluez_call(self._bus, "RequestDefaultAgent", "o", [AGENT_PATH])
+            await _bluez_call(
+                self._bus, "RegisterAgent", "os", [AGENT_PATH, AGENT_CAPABILITY]
+            )
         _LOGGER.debug("Registered BlueZ auto-confirm agent at %s", AGENT_PATH)
 
     async def stop(self) -> None:
@@ -246,30 +268,37 @@ class _AgentSession:
             self._bus.unexport(AGENT_PATH)
         except Exception:
             pass
-        try:
-            self._bus.disconnect()
-        except Exception:
-            pass
 
 
 @asynccontextmanager
-async def auto_confirm_pairing_agent(address: str | None) -> AsyncIterator[None]:
+async def auto_confirm_pairing_agent(
+    address: str | None, bus: Any | None = None
+) -> AsyncIterator[None]:
     """Register a confirming BlueZ agent around a ``Pair`` call.
 
-    On non-Linux platforms, or if dbus-fast / BlueZ is unavailable, this is a
-    no-op so pairing can still be attempted with the host stack's own agent.
+    On non-Linux platforms, or if *bus* is missing, this is a no-op so pairing
+    can still be attempted with the host stack's own agent.
 
-    The agent is the BlueZ default for this process while the context is
-    active. Hold a shared lock so a second shade cannot replace it.
+    Register on the Bleak client bus so ``Device.Pair`` is confirmed without
+    calling RequestDefaultAgent. Hold a shared lock because BlueZ allows only
+    one agent per D-Bus unique name.
     """
     async with _get_agent_lock():
         if sys.platform != "linux" or not address:
             yield
             return
 
+        if bus is None:
+            _LOGGER.warning(
+                "Could not find Bleak's D-Bus connection; Pair may fail without "
+                "a yes/no confirmation"
+            )
+            yield
+            return
+
         session: _AgentSession | None = None
         try:
-            session = await _AgentSession.start(address)
+            session = await _AgentSession.start(address, bus)
         except Exception as err:
             _LOGGER.warning(
                 "Could not register a BlueZ pairing agent; Pair may fail without "

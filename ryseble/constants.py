@@ -14,8 +14,3 @@ PAIRING_MODE_FLAG = 0x40
 BOND_RETRIES = 5
 BOND_RETRY_DELAY = 1.0
 DEFAULT_CONNECT_ATTEMPTS = 4
-
-# BlueZ AuthenticationFailed is common until a confirming Agent1 is in place.
-BOND_RETRIES = 5
-BOND_RETRY_DELAY = 1.0
-DEFAULT_CONNECT_ATTEMPTS = 4

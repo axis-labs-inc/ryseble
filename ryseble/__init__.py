@@ -11,15 +11,16 @@ Modules:
 - pairing: Advertisement pairing-mode detection
 """
 
-from .device import RyseBLEDevice
-from .packets import build_position_packet, build_get_position_packet
 from .constants import HARDCODED_UUIDS
+from .device import RyseAuthenticationFailed, RyseBLEDevice
+from .packets import build_get_position_packet, build_position_packet
 from .pairing import is_pairing_mode
 
 __all__ = [
-    "RyseBLEDevice",
-    "build_position_packet",
-    "build_get_position_packet",
     "HARDCODED_UUIDS",
+    "RyseAuthenticationFailed",
+    "RyseBLEDevice",
+    "build_get_position_packet",
+    "build_position_packet",
     "is_pairing_mode",
 ]

@@ -1,6 +1,6 @@
 [project]
 name = "ryseble"
-version = "1.15.1"
+version = "1.16.0"
 description = "Python library for RYSE BLE Smart Shade devices (used by Home Assistant integration)."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -15,6 +15,7 @@ classifiers = [
 dependencies = [
   "bleak>=0.22.0",
   "bleak-retry-connector>=3.0.0",
+  "dbus-fast>=1.83.0; sys_platform == 'linux'",
 ]
 
 [project.urls]

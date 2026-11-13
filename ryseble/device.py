@@ -99,6 +99,11 @@ class RyseBLEDevice:
         self._ble_device = ble_device
         self.address = ble_device.address
 
+    @property
+    def ble_device(self) -> BLEDevice | None:
+        """Return the BLEDevice the next connection will use."""
+        return self._ble_device
+
     async def pair(self, *, replace_bond: bool = False) -> bool:
         """Connect, bond, then subscribe to notifications.
 

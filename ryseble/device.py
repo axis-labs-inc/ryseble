@@ -28,9 +28,26 @@ _LOGGER = logging.getLogger(__name__)
 _CONNECTION_ERRORS = (BleakError, OSError, TimeoutError, EOFError)
 
 
-def _is_authentication_failed(err: BaseException) -> bool:
+# Matched against the exception text. Timeouts and EOF stay transport errors:
+# Home Assistant OS does not put Paired on BLEDevice.details, and a radio
+# glitch must not be reported as a rejected bond.
+_BOND_REJECTION_MARKERS = (
+    "authenticationfailed",
+    "authentication failed",
+    "insufficient authentication",
+    "insufficient encryption",
+    "not permitted",
+    "not paired",
+    "pin or key missing",
+    "0x05",
+    "0x0f",
+)
+
+
+def _is_bond_rejected(err: BaseException) -> bool:
+    """Return True when the error is a rejected or unusable bond."""
     text = str(err).lower()
-    return "authenticationfailed" in text or "authentication failed" in text
+    return any(marker in text for marker in _BOND_REJECTION_MARKERS)
 
 
 class RyseAuthenticationFailed(Exception):
@@ -39,17 +56,6 @@ class RyseAuthenticationFailed(Exception):
     Transport failures are not this error. ``pair()`` re-raises those so the
     caller can retry without asking the user to put the shade in pairing mode.
     """
-
-
-def _reports_paired(ble_device: BLEDevice | None) -> bool:
-    """Return True when the advertisement details say BlueZ already has a bond."""
-    if ble_device is None:
-        return False
-    details = ble_device.details
-    if not isinstance(details, dict):
-        return False
-    props = details.get("props")
-    return isinstance(props, dict) and bool(props.get("Paired"))
 
 
 class RyseBLEDevice:
@@ -117,10 +123,8 @@ class RyseBLEDevice:
             await self._connect()
             if not self.client or not self.client.is_connected:
                 raise BleakError(f"Could not connect to {self.address}")
-            existing_bond = _reports_paired(self._ble_device)
             if replace_bond:
                 await self._remove_stale_bond()
-                existing_bond = False
             await self._bond()
             if not self.client or not self.client.is_connected:
                 raise BleakError(
@@ -131,13 +135,8 @@ class RyseBLEDevice:
                     self.rx_uuid, self._notification_handler
                 )
             except _CONNECTION_ERRORS as err:
-                # Pair was a no-op because BlueZ already held a bond, and the
-                # encrypted CCCD still failed. That bond cannot be reused.
-                if existing_bond:
-                    raise RyseAuthenticationFailed(
-                        f"Existing bond for {self.address} could not enable "
-                        "notifications"
-                    ) from err
+                if _is_bond_rejected(err):
+                    raise RyseAuthenticationFailed(str(err)) from err
                 raise
             _LOGGER.debug("Successfully paired with %s", self.address)
             return True
@@ -147,7 +146,7 @@ class RyseBLEDevice:
             raise
         except _CONNECTION_ERRORS as err:
             await self.unpair()
-            if _is_authentication_failed(err):
+            if _is_bond_rejected(err):
                 _LOGGER.debug("Bond rejected for %s: %s", self.address, err)
                 raise RyseAuthenticationFailed(str(err)) from err
             _LOGGER.debug("Could not pair with %s: %s", self.address, err)
@@ -212,7 +211,7 @@ class RyseBLEDevice:
                     await self.client.pair()
                 return
             except _CONNECTION_ERRORS as err:
-                if not _is_authentication_failed(err):
+                if not _is_bond_rejected(err):
                     raise
                 last_error = err
                 if attempt > BOND_RETRIES:

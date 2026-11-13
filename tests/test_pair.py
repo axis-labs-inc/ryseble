@@ -25,8 +25,21 @@ def _skip_bluez_agent(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("ryseble.device.asyncio.sleep", AsyncMock())
 
 
-def _shade(*, paired: bool = False) -> RyseBLEDevice:
-    details = {"props": {"Paired": True}} if paired else {}
+def _shade(*, paired: bool = False, mgmt: bool = False) -> RyseBLEDevice:
+    """Build a shade.
+
+    ``mgmt`` matches Home Assistant OS: the advertisement props name the
+    adapter and never include Paired.
+    """
+    if mgmt:
+        details = {
+            "path": "/org/bluez/hci0/dev_AA",
+            "props": {"Adapter": "/org/bluez/hci0"},
+        }
+    elif paired:
+        details = {"props": {"Paired": True}}
+    else:
+        details = {}
     return RyseBLEDevice(BLEDevice(ADDRESS, "RYSE", details))
 
 
@@ -94,14 +107,52 @@ async def test_replace_bond_removes_bluez_device_before_pairing() -> None:
     second.start_notify.assert_awaited_once()
 
 
-async def test_stale_bond_notify_failure_is_authentication() -> None:
-    """A bond BlueZ already has that cannot enable notifications is rejected."""
-    device = _shade(paired=True)
+@pytest.mark.parametrize(
+    ("shade", "error"),
+    [
+        pytest.param("plain", BleakError("Insufficient Encryption"), id="encryption"),
+        pytest.param("plain", BleakError("Not paired"), id="not-paired"),
+        pytest.param("mgmt", BleakError("ATT error: 0x05"), id="mgmt-att"),
+        pytest.param("paired", BleakError("PIN or Key Missing"), id="paired-pin"),
+    ],
+)
+async def test_notify_bond_rejection_is_authentication(
+    shade: str, error: Exception
+) -> None:
+    """An authentication-shaped notify failure is a rejected bond.
+
+    The advertisement's Paired property is not consulted. Home Assistant OS
+    never sets it, and a host that does set it must not treat every later
+    notify failure as a rejected bond.
+    """
+    device = _shade(paired=shade == "paired", mgmt=shade == "mgmt")
     client = _client()
-    client.start_notify.side_effect = BleakError("notify failed")
+    client.start_notify.side_effect = error
     _attach_client(device, client)
 
-    with pytest.raises(RyseAuthenticationFailed, match="Existing bond"):
+    with pytest.raises(RyseAuthenticationFailed):
         await device.pair()
 
     client.unpair.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("shade", "error"),
+    [
+        pytest.param("mgmt", EOFError("dbus closed"), id="mgmt-eof"),
+        pytest.param("mgmt", TimeoutError("timed out"), id="mgmt-timeout"),
+        pytest.param("paired", TimeoutError("timed out"), id="paired-timeout"),
+        pytest.param("paired", BleakError("notify failed"), id="paired-generic"),
+    ],
+)
+async def test_notify_transport_error_stays_transport(
+    shade: str, error: Exception
+) -> None:
+    """Timeouts, disconnects, and generic notify errors stay transport errors."""
+    device = _shade(paired=shade == "paired", mgmt=shade == "mgmt")
+    client = _client()
+    client.start_notify.side_effect = error
+    _attach_client(device, client)
+
+    with pytest.raises(type(error)):
+        await device.pair()

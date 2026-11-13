@@ -83,6 +83,7 @@ class RyseBLEDevice:
         self.rx_uuid = rx_uuid or HARDCODED_UUIDS["rx_uuid"]
         self.tx_uuid = tx_uuid or HARDCODED_UUIDS["tx_uuid"]
         self.client = None
+        self.disconnected_callback = None
 
     def set_ble_device(self, ble_device: BLEDevice) -> None:
         """Replace the BLEDevice with a freshly advertised one.
@@ -157,6 +158,12 @@ class RyseBLEDevice:
             await self.unpair()
             raise
 
+    def _forward_disconnect(self, client) -> None:
+        """Forward a GATT disconnect to the callback registered by the caller."""
+        callback = self.disconnected_callback
+        if callable(callback):
+            callback(client)
+
     async def _connect(self) -> None:
         """Establish a GATT connection, preferring bleak-retry-connector."""
         if self._ble_device is not None:
@@ -166,19 +173,24 @@ class RyseBLEDevice:
                     establish_connection,
                 )
             except ImportError:
-                self.client = BleakClient(self._ble_device)
+                self.client = BleakClient(
+                    self._ble_device, disconnected_callback=self._forward_disconnect
+                )
                 await self.client.connect(timeout=30.0)
                 return
             self.client = await establish_connection(
                 BleakClientWithServiceCache,
                 self._ble_device,
                 self.address or "RYSE",
+                disconnected_callback=self._forward_disconnect,
                 ble_device_callback=lambda: self._ble_device,
                 max_attempts=DEFAULT_CONNECT_ATTEMPTS,
             )
             return
 
-        self.client = BleakClient(self.address)
+        self.client = BleakClient(
+            self.address, disconnected_callback=self._forward_disconnect
+        )
         await self.client.connect(timeout=30.0)
 
     async def _remove_stale_bond(self) -> None:

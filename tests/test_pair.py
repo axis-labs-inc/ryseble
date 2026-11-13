@@ -62,6 +62,28 @@ def _client() -> MagicMock:
     return client
 
 
+async def test_connect_forwards_disconnected_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The GATT client is constructed with the caller's disconnect callback."""
+    device = _shade()
+    client = _client()
+    seen: dict[str, object] = {}
+
+    async def _establish(*_args, **kwargs):
+        seen["callback"] = kwargs["disconnected_callback"]
+        return client
+
+    monkeypatch.setattr("bleak_retry_connector.establish_connection", _establish)
+    received: list[object] = []
+    device.disconnected_callback = received.append
+
+    await device._connect()
+    seen["callback"](client)
+
+    assert received == [client]
+
+
 async def test_transport_error_is_reraised(caplog: pytest.LogCaptureFixture) -> None:
     """A connect or bond transport error is not reported as a failed bond."""
     device = _shade()

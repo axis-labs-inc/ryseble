@@ -107,6 +107,42 @@ async def test_replace_bond_removes_bluez_device_before_pairing() -> None:
     second.start_notify.assert_awaited_once()
 
 
+async def test_replace_bond_retries_until_bluez_recreates_the_device() -> None:
+    """RemoveDevice can delete the BlueZ object before the next advertisement."""
+    device = _shade(paired=True)
+    calls = 0
+
+    async def _connect() -> None:
+        nonlocal calls
+        calls += 1
+        device.client = _client()
+        if calls == 2:
+            raise BleakError("UnknownObject")
+
+    device._connect = AsyncMock(side_effect=_connect)
+
+    assert await device.pair(replace_bond=True)
+    assert calls == 3
+
+
+async def test_replace_bond_logs_a_failed_removal(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failed RemoveDevice is visible, and pairing still reconnects."""
+    device = _shade(paired=True)
+    client = _client()
+    client.unpair.side_effect = BleakError("RemoveDevice failed")
+    _attach_client(device, client)
+
+    assert await device.pair(replace_bond=True)
+
+    assert any(
+        record.levelname == "WARNING"
+        and "Could not remove the existing bond" in record.message
+        for record in caplog.records
+    )
+
+
 @pytest.mark.parametrize(
     ("shade", "error"),
     [

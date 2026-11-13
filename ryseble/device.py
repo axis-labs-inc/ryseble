@@ -14,6 +14,7 @@ from bleak.backends.device import BLEDevice
 
 from .bluez_agent import auto_confirm_pairing_agent, bleak_client_dbus_bus
 from .constants import (
+    BOND_REMOVE_RECONNECT_ATTEMPTS,
     BOND_RETRIES,
     BOND_RETRY_DELAY,
     DEFAULT_CONNECT_ATTEMPTS,
@@ -191,14 +192,33 @@ class RyseBLEDevice:
         try:
             await remove()
         except _CONNECTION_ERRORS as err:
-            _LOGGER.debug(
+            _LOGGER.warning(
                 "Could not remove the existing bond for %s: %s", self.address, err
             )
-        await self._connect()
-        if not self.client or not self.client.is_connected:
-            raise BleakError(
-                f"Could not reconnect to {self.address} after removing the bond"
+        last_error: BaseException | None = None
+        for attempt in range(1, BOND_REMOVE_RECONNECT_ATTEMPTS + 1):
+            try:
+                await self._connect()
+            except _CONNECTION_ERRORS as err:
+                last_error = err
+            else:
+                if self.client and self.client.is_connected:
+                    return
+                last_error = BleakError(
+                    f"Could not reconnect to {self.address} after removing the bond"
+                )
+            if attempt == BOND_REMOVE_RECONNECT_ATTEMPTS:
+                break
+            _LOGGER.debug(
+                "Reconnect to %s after removing the bond failed (%s); retry %s/%s",
+                self.address,
+                last_error,
+                attempt,
+                BOND_REMOVE_RECONNECT_ATTEMPTS,
             )
+            await asyncio.sleep(BOND_RETRY_DELAY)
+        assert last_error is not None
+        raise last_error
 
     async def _bond(self) -> None:
         """Establish an OS-level bond, retrying AuthenticationFailed."""
